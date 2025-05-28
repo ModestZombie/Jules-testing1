@@ -1,1 +1,142 @@
 # Jules-testing1
+# ServiceNow Docs Scraper
+
+This project uses Scrapy and scrapy-playwright to scrape dynamic content from ServiceNow documentation pages.
+
+## Project Setup
+
+1.  **Scrapy Project Creation:**
+    *   A Scrapy project named `servicenow_scraper` was initialized using:
+        ```bash
+        scrapy startproject servicenow_scraper
+        ```
+
+2.  **Dependencies:**
+    *   The primary dependency is `scrapy-playwright`.
+    *   These were installed by creating a `requirements.txt` file in the project root (`/app`) with the content:
+        ```
+        scrapy-playwright
+        ```
+    *   And then running:
+        ```bash
+        pip install -r requirements.txt
+        ```
+    *   Playwright browser binaries and their OS dependencies were installed using:
+        ```bash
+        playwright install --with-deps
+        ```
+
+3.  **Scrapy Configuration (`servicenow_scraper/settings.py`):**
+    *   To enable Playwright, the following settings were added/modified in `settings.py`:
+        ```python
+        TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
+        DOWNLOAD_HANDLERS = {
+            "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
+            "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
+        }
+        PLAYWRIGHT_BROWSER_TYPE = "chromium"  # Or other browsers like 'firefox', 'webkit'
+        PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 30000  # 30 seconds
+        ```
+
+## Scraping Methodology for Dynamic Content
+
+The target website ([https://www.servicenow.com/docs/](https://www.servicenow.com/docs/)) loads content dynamically using JavaScript. To scrape this content, `scrapy-playwright` is used to control a browser instance.
+
+**Spider: `servicenow_scraper/spiders/docs_spider.py`**
+
+1.  **Requesting with Playwright:**
+    *   The spider initiates requests with Playwright enabled by setting `meta={'playwright': True}`.
+    *   It's also important to get access to the Playwright `Page` object for more fine-grained control, so `playwright_include_page=True` is also passed in the meta.
+    *   Example:
+        ```python
+        def start_requests(self):
+            urls = ["https://www.servicenow.com/docs/bundle/washingtondc-servicenow-platform/page/product/configuration-management/concept/identification-simulation.html?state=seamless"]
+            for url in urls:
+                yield scrapy.Request(
+                    url,
+                    meta={
+                        'playwright': True,
+                        'playwright_include_page': True,
+                        # Optional: define playwright page methods directly in meta
+                        # 'playwright_page_methods': [
+                        # PageMethod('wait_for_selector', '*:has-text("Examine run logs")'),
+                        # ],
+                    },
+                    callback=self.parse_page,
+                    errback=self.errback_close_page
+                )
+        ```
+
+2.  **Waiting for Dynamic Content:**
+    *   Before extracting text, the spider ensures the dynamic content has loaded. The specific page scraped required waiting for a text snippet to be visible.
+    *   This is achieved using Playwright's `page.wait_for_selector()` method within the parse callback.
+    *   Example from `parse_page` callback:
+        ```python
+        # In parse_page(self, response):
+        page = response.meta["playwright_page"]
+        # Wait for a unique piece of text from the target section
+        try:
+            await page.wait_for_selector('*:has-text("Examine run logs Identification simulation provides run logs")', timeout=15000) # 15s timeout
+        except Exception as e:
+            self.logger.error(f"Playwright wait_for_selector timed out or failed: {e}")
+            await page.close()
+            return # or yield an item indicating failure
+        ```
+        *Note: An `errback` (`errback_close_page`) is crucial to close the Playwright page if the request fails or times out before reaching the callback.*
+        ```python
+        async def errback_close_page(self, failure):
+            page = failure.request.meta.get('playwright_page')
+            if page:
+                await page.close()
+        ```
+
+
+3.  **Extracting Text:**
+    *   Once the content is confirmed to be loaded, the spider extracts text from the page body.
+    *   `await page.locator('body').inner_text()` was found to be effective.
+    *   Example:
+        ```python
+        extracted_text = await page.locator('body').inner_text()
+        # Fallback if needed
+        if not extracted_text or len(extracted_text) < 200: # Arbitrary length check
+             extracted_text = await page.evaluate("() => document.body.textContent")
+
+        ```
+
+4.  **Text Verification and Normalization:**
+    *   The specific target string to confirm successful scraping was: "Examine run logs Identification simulation provides run logs which are generated by Identification and Reconciliation Engine (IRE). You can access these run logs for payload runs, to examine results and for debugging purposes. IRE payload output logs appear in a user friendly format on a central page."
+    *   Direct string comparison (`target in extracted_text`) can be unreliable due to variations in whitespace, newlines, or HTML structure within the rendered text.
+    *   To make the comparison robust, both the extracted text and the target string are normalized by:
+        *   Replacing multiple whitespace characters (including newlines, tabs) with a single space.
+        *   Trimming leading/trailing whitespace.
+    *   Example (using the `re` module):
+        ```python
+        import re
+        
+        # In spider's parse_page method:
+        normalized_extracted_text = re.sub(r'\s+', ' ', extracted_text).strip()
+        normalized_target_text = re.sub(r'\s+', ' ', self.target_text_full).strip()
+        
+        text_found = normalized_target_text in normalized_extracted_text
+        ```
+
+5.  **Closing Playwright Page:**
+    *   It's essential to close the Playwright page after processing to free up resources. This is done using `await page.close()` typically in a `finally` block or after the main processing in the callback.
+        ```python
+        # In parse_page, after all operations:
+        await page.close()
+        ```
+
+## Running the Spider
+
+1.  Navigate to the `servicenow_scraper` project directory:
+    ```bash
+    cd servicenow_scraper
+    ```
+2.  Run the spider:
+    ```bash
+    scrapy crawl docs_spider
+    ```
+    The output will include logs and any items yielded by the spider, indicating whether the target text was found.
+
+This methodology (using Playwright for rendering, waiting for specific elements/text, careful text extraction, and normalization for verification) can be adapted to scrape other dynamic pages from this site or similar websites.
