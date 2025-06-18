@@ -1,4 +1,3 @@
-# Jules-testing1
 # ServiceNow Docs Scraper
 
 This project uses Scrapy and scrapy-playwright to scrape dynamic content from ServiceNow documentation pages.
